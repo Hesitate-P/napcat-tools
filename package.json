@@ -2,14 +2,24 @@
   "name": "napcat-tools",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "type": "module",
+  "main": "scripts/napcat-tools.js",
+  "bin": {
+    "napcat-tools": "./scripts/napcat-tools.js"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "node -e \"console.log('napcat-tools: no build step required')\"",
+    "typecheck": "node --check scripts/napcat-tools.js",
+    "test": "node --test ./test/index.test.js",
+    "ci": "npm run typecheck && npm run test && npm run build"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "ws": "^8.19.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

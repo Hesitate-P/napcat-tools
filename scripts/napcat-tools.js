@@ -2,357 +2,475 @@
 
 /**
  * NapCat Tools - 命令行工具接口
- * 
- * 供 OpenClaw Skill 调用的命令行工具
- * 支持：发送文件、发送语音、发送视频、下载文件
+ *
+ * 供 OpenClaw Skill 调用的命令行工具。
+ * 重点职责：主动调用 NapCat API，并以稳定 JSON 输出结果。
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DOWNLOAD_DIR = join(__dirname, "..", "temp");
 
-// 读取配置
+function printJson(payload, isError = false) {
+  const json = JSON.stringify(payload);
+  if (isError) {
+    console.error(json);
+  } else {
+    console.log(json);
+  }
+}
+
+export function buildFailurePayload(message, details, usage) {
+  return {
+    success: false,
+    error: message,
+    ...(details ? { details } : {}),
+    ...(usage ? { usage } : {}),
+  };
+}
+
+function fail(message, details, usage) {
+  printJson(buildFailurePayload(message, details, usage), true);
+  process.exit(1);
+}
+
 function readConfig() {
-  const configPath = join(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'openclaw.json');
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  const configPath = join(home, ".openclaw", "openclaw.json");
+
   try {
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    const config = JSON.parse(readFileSync(configPath, "utf-8"));
     return config.channels?.napcat || {};
   } catch (error) {
-    console.error(JSON.stringify({ error: '无法读取 OpenClaw 配置', details: error.message }));
-    process.exit(1);
+    fail("无法读取 OpenClaw 配置", error instanceof Error ? error.message : String(error));
   }
 }
 
-// 消息去重：记录最近发送的消息 ID
-const SENT_MESSAGES = new Map();
-const DEDUP_WINDOW_MS = 5000; // 5 秒内去重
-
-function checkDuplicate(action, params) {
-  const key = `${action}:${JSON.stringify(params)}`;
-  const now = Date.now();
-  
-  // 清理过期的记录
-  for (const [k, timestamp] of SENT_MESSAGES.entries()) {
-    if (now - timestamp > DEDUP_WINDOW_MS) {
-      SENT_MESSAGES.delete(k);
-    }
-  }
-  
-  // 检查是否重复
-  if (SENT_MESSAGES.has(key)) {
-    return true;
-  }
-  
-  SENT_MESSAGES.set(key, now);
-  return false;
-}
-
-// 发送 WebSocket 请求
-async function sendAction(action, params) {
+function getConnectionConfig() {
   const config = readConfig();
-  // 兼容新旧配置结构：新配置在 connection 对象里，旧配置直接在根级别
   const wsUrl = config.connection?.wsUrl || config.wsUrl;
   const accessToken = config.connection?.accessToken || config.accessToken;
-  
+
   if (!wsUrl) {
-    console.error(JSON.stringify({ error: 'NapCat wsUrl 未配置' }));
-    process.exit(1);
+    fail("NapCat wsUrl 未配置");
   }
-  
-  // 检查重复发送
-  if (checkDuplicate(action, params)) {
-    console.error(JSON.stringify({ step: '检测到重复请求，已跳过', action, params }));
-    return { skipped: true, reason: 'duplicate' };
-  }
-  
-  // 使用 WebSocket 发送请求
-  const WebSocket = (await import('ws')).default;
-  
-  return new Promise((resolve, reject) => {
-    // NapCat 认证方式：access_token 查询参数
+
+  return { wsUrl, accessToken };
+}
+
+async function sendAction(action, params = {}) {
+  const { wsUrl, accessToken } = getConnectionConfig();
+  const WebSocket = (await import("ws")).default;
+
+  return new Promise((resolvePromise, rejectPromise) => {
     const fullUrl = accessToken ? `${wsUrl}?access_token=${encodeURIComponent(accessToken)}` : wsUrl;
-    console.error(JSON.stringify({ step: '连接 WebSocket', url: fullUrl.replace(accessToken, '***') }));
     const ws = new WebSocket(fullUrl);
-    
-    ws.on('open', () => {
-      const echo = `napcat-tools-${Date.now()}`;
-      const request = {
-        action,
-        params,
-        echo,
-      };
-      
-      console.error(JSON.stringify({ step: '发送请求', action, params }));
-      ws.send(JSON.stringify(request));
-      
+
+    ws.on("open", () => {
+      const echo = `napcat-tools-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      ws.send(JSON.stringify({ action, params, echo }));
+
       const timeout = setTimeout(() => {
         ws.close();
-        reject(new Error('请求超时'));
+        rejectPromise(new Error(`请求超时: ${action}`));
       }, 30000);
-      
-      const messageHandler = (data) => {
+
+      ws.on("message", (data) => {
         try {
           const response = JSON.parse(data.toString());
-          console.error(JSON.stringify({ step: '收到响应', response }));
-          
-          // 检查是否是这个请求的响应（通过 echo 匹配）
-          if (response.echo !== echo) {
-            console.error(JSON.stringify({ step: 'echo 不匹配', expected: echo, got: response.echo }));
-            return;  // 不是这个请求的响应，忽略
-          }
-          
+          if (response.echo !== echo) return;
+
           clearTimeout(timeout);
-          if (response.retcode === 0 || response.status === 'ok') {
-            resolve(response.data);
-            ws.close();
-          } else {
-            reject(new Error(response.message || JSON.stringify(response)));
-            ws.close();
-          }
-        } catch (error) {
-          console.error(JSON.stringify({ step: '解析错误', data: data.toString() }));
-          reject(error);
           ws.close();
+
+          if (response.retcode === 0 || response.status === "ok") {
+            resolvePromise(response.data);
+            return;
+          }
+
+          rejectPromise(new Error(response.message || response.wording || JSON.stringify(response)));
+        } catch (error) {
+          clearTimeout(timeout);
+          ws.close();
+          rejectPromise(error);
         }
-      };
-      
-      ws.on('message', messageHandler);
+      });
     });
-    
-    ws.on('error', (error) => {
-      reject(error);
+
+    ws.on("error", (error) => {
+      rejectPromise(error);
     });
   });
 }
 
-// 主函数
-async function main() {
-  const args = process.argv.slice(2);
-  const command = args[0];
-  
-  try {
-    let result;
-    
-    switch (command) {
-      case 'send_message': {
-        // napcat-tools.js send_message <chat_type> <chat_id> <message>
-        const chatType = args[1];
-        const chatId = args[2];
-        const message = args.slice(3).join(' ');
-        
-        if (!chatType || !chatId || !message) {
-          console.error(JSON.stringify({ error: '参数不足', usage: 'send_message <chat_type> <chat_id> <message>' }));
-          process.exit(1);
-        }
-        
-        const isGroup = chatType === 'group';
-        const id = chatId.startsWith('user:') ? parseInt(chatId.slice(5)) : parseInt(chatId);
-        
-        const action = isGroup ? 'send_group_msg' : 'send_private_msg';
-        result = await sendAction(action, {
-          [isGroup ? 'group_id' : 'user_id']: id,
-          message: [{ type: 'text', data: { text: message } }],
-        });
-        
-        console.log(JSON.stringify({ success: true, message: '消息发送成功', data: result }));
-        break;
-      }
-      
-      case 'send_file': {
-        // napcat-tools.js send_file <chat_type> <chat_id> <file_path> [file_name]
-        const chatType = args[1];
-        const chatId = args[2];
-        const filePath = args[3];
-        const fileName = args[4] || filePath.split('/').pop();
-        
-        if (!chatType || !chatId || !filePath) {
-          console.error(JSON.stringify({ error: '参数不足', usage: 'send_file <chat_type> <chat_id> <file_path> [file_name]' }));
-          process.exit(1);
-        }
-        
-        const isGroup = chatType === 'group';
-        const id = chatId.startsWith('user:') ? parseInt(chatId.slice(5)) : parseInt(chatId);
-        
-        // 使用 send_msg + file 元素发送文件（更通用的方式）
-        const action = isGroup ? 'send_group_msg' : 'send_private_msg';
-        result = await sendAction(action, {
-          [isGroup ? 'group_id' : 'user_id']: id,
-          message: [{ type: 'file', data: { file: `file://${filePath}`, name: fileName } }],
-        });
-        
-        console.log(JSON.stringify({ success: true, message: '文件发送成功', data: result }));
-        break;
-      }
-      
-      case 'send_record': {
-        // napcat-tools.js send_record <chat_type> <chat_id> <file_path>
-        const chatType = args[1];
-        const chatId = args[2];
-        const filePath = args[3];
-        
-        if (!chatType || !chatId || !filePath) {
-          console.error(JSON.stringify({ error: '参数不足', usage: 'send_record <chat_type> <chat_id> <file_path>' }));
-          process.exit(1);
-        }
-        
-        const isGroup = chatType === 'group';
-        const id = chatId.startsWith('user:') ? parseInt(chatId.slice(5)) : parseInt(chatId);
-        
-        const action = isGroup ? 'send_group_msg' : 'send_private_msg';
-        result = await sendAction(action, {
-          [isGroup ? 'group_id' : 'user_id']: id,
-          message: [{ type: 'record', data: { file: filePath } }],
-        });
-        
-        console.log(JSON.stringify({ success: true, message: '语音发送成功', data: result }));
-        break;
-      }
-      
-      case 'send_video': {
-        // napcat-tools.js send_video <chat_type> <chat_id> <file_path>
-        const chatType = args[1];
-        const chatId = args[2];
-        const filePath = args[3];
-        
-        if (!chatType || !chatId || !filePath) {
-          console.error(JSON.stringify({ error: '参数不足', usage: 'send_video <chat_type> <chat_id> <file_path>' }));
-          process.exit(1);
-        }
-        
-        const isGroup = chatType === 'group';
-        const id = chatId.startsWith('user:') ? parseInt(chatId.slice(5)) : parseInt(chatId);
-        
-        const action = isGroup ? 'send_group_msg' : 'send_private_msg';
-        result = await sendAction(action, {
-          [isGroup ? 'group_id' : 'user_id']: id,
-          message: [{ type: 'video', data: { file: filePath } }],
-        });
-        
-        console.log(JSON.stringify({ success: true, message: '视频发送成功', data: result }));
-        break;
-      }
-      
-      case 'download_file': {
-        // napcat-tools.js download_file <file_id> [save_path]
-        const fileId = args[1];
-        let savePath = args[2];
-        
-        // 固定下载目录：相对于 skill 脚本所在目录的 ./temp 文件夹
-        const DEFAULT_DOWNLOAD_DIR = join(__dirname, '..', 'temp') + '/';
-        
-        if (!fileId) {
-          console.error(JSON.stringify({ error: '参数不足', usage: 'download_file <file_id> [save_path]' }));
-          process.exit(1);
-        }
-        
-        // 如果没有指定保存路径，使用默认目录
-        if (!savePath) {
-          savePath = DEFAULT_DOWNLOAD_DIR + fileId;
-        }
-        
-        result = await sendAction('get_file', { file_id: fileId });
-        
-        // 保存文件
-        if (result.data) {
-          writeFileSync(savePath, result.data);
-          result.save_path = savePath;
-          console.log(JSON.stringify({ success: true, message: '文件下载成功', data: { file_path: savePath } }));
-        } else {
-          console.log(JSON.stringify({ success: true, message: '文件下载成功（数据已在 NapCat 目录）', data: { file_path: DEFAULT_DOWNLOAD_DIR + fileId } }));
-        }
-        
-        break;
-      }
-      
-      case 'query_messages': {
-        // napcat-tools.js query_messages <chat_type> <chat_id> [limit]
-        const chatType = args[1];
-        const chatId = args[2];
-        const limit = parseInt(args[3]) || 20;
-        
-        if (!chatType || !chatId) {
-          console.error(JSON.stringify({ error: '参数不足', usage: 'query_messages <chat_type> <chat_id> [limit]' }));
-          process.exit(1);
-        }
-        
-        const isGroup = chatType === 'group';
-        const id = chatId.startsWith('user:') ? parseInt(chatId.slice(5)) : parseInt(chatId);
-        
-        // 使用 get_group_msg_history 或 get_friend_msg_history 查询历史消息
-        const action = isGroup ? 'get_group_msg_history' : 'get_friend_msg_history';
-        result = await sendAction(action, {
-          [isGroup ? 'group_id' : 'user_id']: id,
-          message_seq: 0,  // 0 表示最新消息
-          count: limit,
-          reverseOrder: true,  // 倒序，最新的在前
-        });
-        
-        // 格式化返回结果 - 使用通用消息解析函数
-        const messages = await Promise.all((result.messages || []).map(async (msg) => {
-          // 复用消息解析逻辑
-          let content = '';
-          try {
-            for (const m of (msg.message || [])) {
-              if (m.type === 'text') content += m.data?.text || '';
-              else if (m.type === 'at') {
-                const qqId = m.data?.qq ?? m.data?.user_id;
-                if (qqId === 'all' || qqId === 'everyone') content += ' @全体成员 ';
-                else content += ` @${qqId || ''} `;
-              }
-              else if (m.type === 'face') {
-                const faceId = String(m.data?.id ?? m.data?.face_id ?? '0');
-                content += ` [表情:${faceId}] `;
-              }
-              else if (m.type === 'image') {
-                const url = m.data?.url || m.data?.file;
-                const summary = m.data?.summary;
-                if (summary) content += ` [图片：${summary}] `;
-                else if (url && (url.startsWith('http') || url.startsWith('base64://'))) content += ` [图片：${url}] `;
-                else content += ' [图片] ';
-              }
-              else if (m.type === 'file') {
-                const name = m.data?.name || 'unknown';
-                const fileId = m.data?.file_id || m.file_id || 'unknown';
-                content += `[文件：${name}, ID:${fileId}]`;
-              }
-              else if (m.type === 'record') content += ' [语音] ';
-              else if (m.type === 'video') content += ' [视频] ';
-              else if (m.type === 'mface') content += ` [商城表情：${m.data?.summary || `ID:${m.data?.emoji_id}`}] `;
-              else if (m.type === 'forward') content += ' [转发消息] ';
-              else if (m.type === 'xml' || m.type === 'json') content += ' [卡片消息] ';
-            }
-          } catch (e) {
-            content = (msg.message || []).map(m => {
-              if (m.type === 'text') return m.data?.text || '';
-              if (m.type === 'file') return `[文件：${m.data?.name || 'unknown'}]`;
-              return `[${m.type}]`;
-            }).join('');
-          }
-          
-          return {
-            message_id: msg.message_id,
-            sender_id: msg.sender?.user_id || msg.user_id,
-            sender_name: msg.sender?.nickname || msg.sender?.card || msg.nickname || '未知',
-            content: content.trim(),
-            timestamp: msg.time ? msg.time * 1000 : Date.now(),
-            raw: msg,
-          };
-        }));
-        
-        console.log(JSON.stringify({ success: true, message: '查询成功', data: { messages, total: messages.length } }));
-        break;
-      }
-      
-      default:
-        console.error(JSON.stringify({ error: '未知命令', usage: 'napcat-tools.js <send_file|send_record|send_video|download_file> [args...]' }));
-        process.exit(1);
+export function parseChatTarget(chatType, chatId) {
+  if (!chatType || !chatId) {
+    fail("参数不足", undefined, "<chat_type> <chat_id>");
+  }
+
+  const isGroup = chatType === "group";
+  const id = chatId.startsWith("user:") ? parseInt(chatId.slice(5), 10) : parseInt(chatId, 10);
+
+  if (Number.isNaN(id)) {
+    fail("聊天 ID 非法", chatId);
+  }
+
+  return { isGroup, id };
+}
+
+function normalizeFileArg(filePath) {
+  if (!filePath) return filePath;
+  const resolvedPath = resolve(filePath);
+  if (existsSync(resolvedPath)) {
+    return pathToFileURL(resolvedPath).href;
+  }
+  return filePath;
+}
+
+export function buildMessageContent(message = []) {
+  return (message || []).map((segment) => {
+    if (segment.type === "text") return segment.data?.text || "";
+    if (segment.type === "at") {
+      const qqId = segment.data?.qq ?? segment.data?.user_id;
+      return qqId === "all" || qqId === "everyone" ? " @全体成员 " : ` @${qqId || ""} `;
     }
+    if (segment.type === "face") {
+      const faceId = String(segment.data?.id ?? segment.data?.face_id ?? "0");
+      return ` [表情:${faceId}] `;
+    }
+    if (segment.type === "image") {
+      const url = segment.data?.url || segment.data?.file;
+      const summary = segment.data?.summary;
+      if (summary) return ` [图片：${summary}] `;
+      if (typeof url === "string" && (url.startsWith("http") || url.startsWith("base64://"))) {
+        return ` [图片：${url}] `;
+      }
+      return " [图片] ";
+    }
+    if (segment.type === "file") {
+      const name = segment.data?.name || "unknown";
+      const fileId = segment.data?.file_id || segment.file_id || "unknown";
+      return `[文件：${name}, ID:${fileId}]`;
+    }
+    if (segment.type === "record") return " [语音] ";
+    if (segment.type === "video") return " [视频] ";
+    if (segment.type === "mface") return ` [商城表情：${segment.data?.summary || `ID:${segment.data?.emoji_id}`}] `;
+    if (segment.type === "forward") return " [转发消息] ";
+    if (segment.type === "xml" || segment.type === "json") return " [卡片消息] ";
+    if (segment.type === "reply") return ` [回复:${segment.data?.id || ""}] `;
+    return segment.type ? `[${segment.type}]` : "";
+  }).join("").trim();
+}
+
+export async function writeDownloadedFile(result, savePath) {
+  mkdirSync(dirname(savePath), { recursive: true });
+
+  if (typeof result.base64 === "string" && result.base64.length > 0) {
+    const buffer = Buffer.from(result.base64, "base64");
+    writeFileSync(savePath, buffer);
+    return buffer.length;
+  }
+
+  if (typeof result.file === "string" && existsSync(result.file)) {
+    copyFileSync(result.file, savePath);
+    return statSync(savePath).size;
+  }
+
+  if (typeof result.url === "string" && result.url.length > 0) {
+    const response = await fetch(result.url);
+    if (!response.ok) {
+      throw new Error(`下载远程文件失败: HTTP ${response.status}`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    writeFileSync(savePath, buffer);
+    return buffer.length;
+  }
+
+  throw new Error("get_file 返回中缺少可下载的数据");
+}
+
+function ok(message, data = {}) {
+  printJson({ success: true, message, data });
+}
+
+export function createCommandHandlers(deps = {}) {
+  const runtime = {
+    sendAction: deps.sendAction || sendAction,
+    ok: deps.ok || ok,
+    fail: deps.fail || fail,
+    defaultDownloadDir: deps.defaultDownloadDir || DEFAULT_DOWNLOAD_DIR,
+  };
+
+  return {
+  async send_message(args) {
+    const chatType = args[0];
+    const chatId = args[1];
+    const message = args.slice(2).join(" ");
+    if (!chatType || !chatId || !message) {
+      runtime.fail("参数不足", undefined, "send_message <chat_type> <chat_id> <message>");
+    }
+
+    const { isGroup, id } = parseChatTarget(chatType, chatId);
+    const result = await runtime.sendAction(isGroup ? "send_group_msg" : "send_private_msg", {
+      [isGroup ? "group_id" : "user_id"]: id,
+      message: [{ type: "text", data: { text: message } }],
+    });
+    runtime.ok("消息发送成功", result);
+  },
+
+  async send_file(args) {
+    const chatType = args[0];
+    const chatId = args[1];
+    const filePath = args[2];
+    const fileName = args[3] || basename(filePath || "");
+    if (!chatType || !chatId || !filePath) {
+      runtime.fail("参数不足", undefined, "send_file <chat_type> <chat_id> <file_path> [file_name]");
+    }
+
+    const { isGroup, id } = parseChatTarget(chatType, chatId);
+    const result = await runtime.sendAction(isGroup ? "send_group_msg" : "send_private_msg", {
+      [isGroup ? "group_id" : "user_id"]: id,
+      message: [{ type: "file", data: { file: normalizeFileArg(filePath), name: fileName } }],
+    });
+    runtime.ok("文件发送成功", result);
+  },
+
+  async send_record(args) {
+    const chatType = args[0];
+    const chatId = args[1];
+    const filePath = args[2];
+    if (!chatType || !chatId || !filePath) {
+      runtime.fail("参数不足", undefined, "send_record <chat_type> <chat_id> <file_path>");
+    }
+
+    const { isGroup, id } = parseChatTarget(chatType, chatId);
+    const result = await runtime.sendAction(isGroup ? "send_group_msg" : "send_private_msg", {
+      [isGroup ? "group_id" : "user_id"]: id,
+      message: [{ type: "record", data: { file: normalizeFileArg(filePath) } }],
+    });
+    runtime.ok("语音发送成功", result);
+  },
+
+  async send_video(args) {
+    const chatType = args[0];
+    const chatId = args[1];
+    const filePath = args[2];
+    if (!chatType || !chatId || !filePath) {
+      runtime.fail("参数不足", undefined, "send_video <chat_type> <chat_id> <file_path>");
+    }
+
+    const { isGroup, id } = parseChatTarget(chatType, chatId);
+    const result = await runtime.sendAction(isGroup ? "send_group_msg" : "send_private_msg", {
+      [isGroup ? "group_id" : "user_id"]: id,
+      message: [{ type: "video", data: { file: normalizeFileArg(filePath) } }],
+    });
+    runtime.ok("视频发送成功", result);
+  },
+
+  async download_file(args) {
+    const fileId = args[0];
+    let savePath = args[1];
+    if (!fileId) {
+      runtime.fail("参数不足", undefined, "download_file <file_id> [save_path]");
+    }
+
+    mkdirSync(runtime.defaultDownloadDir, { recursive: true });
+    if (!savePath) {
+      savePath = join(runtime.defaultDownloadDir, fileId);
+    }
+
+    const result = await runtime.sendAction("get_file", { file_id: fileId });
+    const fileSize = await writeDownloadedFile(result || {}, savePath);
+    runtime.ok("文件下载成功", {
+      file_id: fileId,
+      file_path: savePath,
+      file_size: fileSize,
+      file_name: result?.file_name || basename(savePath),
+    });
+  },
+
+  async query_messages(args) {
+    const chatType = args[0];
+    const chatId = args[1];
+    const limit = parseInt(args[2] || "20", 10);
+    if (!chatType || !chatId) {
+      runtime.fail("参数不足", undefined, "query_messages <chat_type> <chat_id> [limit]");
+    }
+
+    const { isGroup, id } = parseChatTarget(chatType, chatId);
+    const result = await runtime.sendAction(isGroup ? "get_group_msg_history" : "get_friend_msg_history", {
+      [isGroup ? "group_id" : "user_id"]: id,
+      message_seq: 0,
+      count: Number.isNaN(limit) ? 20 : limit,
+      reverseOrder: true,
+    });
+
+    const messages = (result?.messages || []).map((msg) => ({
+      message_id: msg.message_id,
+      sender_id: msg.sender?.user_id || msg.user_id,
+      sender_name: msg.sender?.nickname || msg.sender?.card || msg.nickname || "未知",
+      content: buildMessageContent(msg.message || []),
+      timestamp: msg.time ? msg.time * 1000 : Date.now(),
+      raw: msg,
+    }));
+
+    runtime.ok("查询成功", { messages, total: messages.length });
+  },
+
+  async get_group_members(args) {
+    const groupId = parseInt(args[0], 10);
+    if (Number.isNaN(groupId)) {
+      runtime.fail("参数不足", undefined, "get_group_members <group_id>");
+    }
+
+    const result = await runtime.sendAction("get_group_member_list", { group_id: groupId });
+    runtime.ok("获取群成员成功", { group_id: groupId, members: result || [] });
+  },
+
+  async delete_message(args) {
+    const messageId = args[0];
+    if (!messageId) {
+      runtime.fail("参数不足", undefined, "delete_message <message_id>");
+    }
+
+    await runtime.sendAction("delete_msg", { message_id: messageId });
+    runtime.ok("消息撤回成功", { message_id: messageId });
+  },
+
+  async get_message(args) {
+    const messageId = args[0];
+    if (!messageId) {
+      runtime.fail("参数不足", undefined, "get_message <message_id>");
+    }
+
+    const result = await runtime.sendAction("get_msg", { message_id: messageId });
+    runtime.ok("获取消息详情成功", result || {});
+  },
+
+  async set_group_ban(args) {
+    const groupId = parseInt(args[0], 10);
+    const userId = parseInt(args[1], 10);
+    const duration = parseInt(args[2] || "0", 10);
+    if (Number.isNaN(groupId) || Number.isNaN(userId)) {
+      runtime.fail("参数不足", undefined, "set_group_ban <group_id> <user_id> [duration]");
+    }
+
+    await runtime.sendAction("set_group_ban", { group_id: groupId, user_id: userId, duration });
+    runtime.ok("群禁言操作成功", { group_id: groupId, user_id: userId, duration });
+  },
+
+  async set_group_kick(args) {
+    const groupId = parseInt(args[0], 10);
+    const userId = parseInt(args[1], 10);
+    const rejectAddRequest = ["true", "1", "yes"].includes(String(args[2] || "").toLowerCase());
+    if (Number.isNaN(groupId) || Number.isNaN(userId)) {
+      runtime.fail("参数不足", undefined, "set_group_kick <group_id> <user_id> [reject_add_request]");
+    }
+
+    await runtime.sendAction("set_group_kick", {
+      group_id: groupId,
+      user_id: userId,
+      reject_add_request: rejectAddRequest,
+    });
+    runtime.ok("群踢人操作成功", { group_id: groupId, user_id: userId, reject_add_request: rejectAddRequest });
+  },
+
+  async send_group_notice(args) {
+    const groupId = parseInt(args[0], 10);
+    const content = args.slice(1).join(" ");
+    if (Number.isNaN(groupId) || !content) {
+      runtime.fail("参数不足", undefined, "send_group_notice <group_id> <content>");
+    }
+
+    const result = await runtime.sendAction("_send_group_notice", { group_id: groupId, content });
+    runtime.ok("群公告发送成功", result || {});
+  },
+
+  async get_group_notice(args) {
+    const groupId = parseInt(args[0], 10);
+    if (Number.isNaN(groupId)) {
+      runtime.fail("参数不足", undefined, "get_group_notice <group_id>");
+    }
+
+    const result = await runtime.sendAction("_get_group_notice", { group_id: groupId });
+    runtime.ok("获取群公告成功", { notices: result || [], group_id: groupId });
+  },
+
+  async delete_group_notice(args) {
+    const groupId = parseInt(args[0], 10);
+    const noticeId = args[1];
+    if (Number.isNaN(groupId) || !noticeId) {
+      runtime.fail("参数不足", undefined, "delete_group_notice <group_id> <notice_id>");
+    }
+
+    const result = await runtime.sendAction("_del_group_notice", { group_id: groupId, notice_id: noticeId });
+    runtime.ok("删除群公告成功", result || { group_id: groupId, notice_id: noticeId });
+  },
+
+  async set_essence(args) {
+    const messageId = args[0];
+    if (!messageId) {
+      runtime.fail("参数不足", undefined, "set_essence <message_id>");
+    }
+
+    await runtime.sendAction("set_essence_msg", { message_id: messageId });
+    runtime.ok("设为精华成功", { message_id: messageId });
+  },
+
+  async delete_essence(args) {
+    const messageId = args[0];
+    if (!messageId) {
+      runtime.fail("参数不足", undefined, "delete_essence <message_id>");
+    }
+
+    await runtime.sendAction("delete_essence_msg", { message_id: messageId });
+    runtime.ok("取消精华成功", { message_id: messageId });
+  },
+
+  async get_essence_list(args) {
+    const groupId = parseInt(args[0], 10);
+    if (Number.isNaN(groupId)) {
+      runtime.fail("参数不足", undefined, "get_essence_list <group_id>");
+    }
+
+    const result = await runtime.sendAction("get_essence_msg_list", { group_id: groupId });
+    runtime.ok("获取精华消息成功", { group_id: groupId, messages: result || [] });
+  },
+  };
+}
+
+const commandHandlers = createCommandHandlers();
+const commandUsage = Object.keys(commandHandlers).join("|");
+
+export async function main(argv = process.argv.slice(2), handlers = commandHandlers) {
+  const command = argv[0];
+
+  if (!command || !handlers[command]) {
+    fail(
+      "未知命令",
+      command || "empty",
+      commandUsage,
+    );
+  }
+
+  try {
+    await handlers[command](argv.slice(1));
   } catch (error) {
-    console.error(JSON.stringify({ error: '执行失败', details: error.message }));
-    process.exit(1);
+    fail("执行失败", error instanceof Error ? error.message : String(error));
   }
 }
 
-main();
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main();
+}
