@@ -72,10 +72,21 @@ function formatFileSize(bytes) {
   return `${n}B`;
 }
 
-/** QQ 表情映射（在线获取+内存缓存，数据来源：QFace https://koishi.js.org/QFace）*/
+/** QQ 表情映射（每次启动从网络拉取最新数据，持久化到本地文件作为离线 fallback）*/
 let _faceMap = null;
+const _faceMapCachePath = join(__dirname, '..', 'face-map-cache.json');
+
 async function loadFaceMap() {
   if (_faceMap) return _faceMap;
+
+  // 先尝试读取本地缓存（让表情在网络请求完成前就可用）
+  try {
+    const { readFileSync } = await import('fs');
+    const raw = readFileSync(_faceMapCachePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') _faceMap = parsed;
+  } catch { /* 无缓存文件，忽略 */ }
+
   return new Promise((resolve) => {
     import('https').then(({ default: https }) => {
       https.get('https://koishi.js.org/QFace/assets/qq_emoji/_index.json', (res) => {
@@ -89,11 +100,15 @@ async function loadFaceMap() {
                 map[item.emojiId] = item.describe.replace(/^\//, '').trim();
             }
             _faceMap = map;
-          } catch { _faceMap = {}; }
+            // 写入本地缓存（静默失败）
+            import('fs').then(({ writeFile }) => {
+              writeFile(_faceMapCachePath, JSON.stringify(map), () => {});
+            }).catch(() => {});
+          } catch { if (!_faceMap) _faceMap = {}; }
           resolve(_faceMap);
         });
-      }).on('error', () => { _faceMap = {}; resolve({}); });
-    }).catch(() => { _faceMap = {}; resolve({}); });
+      }).on('error', () => { resolve(_faceMap || {}); });
+    }).catch(() => { resolve(_faceMap || {}); });
   });
 }
 // 预加载
