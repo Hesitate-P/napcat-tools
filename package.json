@@ -1,14 +1,15 @@
 {
   "name": "napcat-tools",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "3.0.0",
+  "description": "OpenClaw AgentSkill - NapCat QQ API tools",
+  "type": "module",
+  "main": "scripts/napcat-tools.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": ["openclaw", "napcat", "qq", "skill"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "ws": "^8.19.0"
   }

@@ -255,7 +255,14 @@ async function sendAction(action, params) {
       clearTimeout(timeout);
       ws.close();
       if (resp.retcode === 0 || resp.status === 'ok') resolve(resp.data);
-      else reject(new Error(resp.message || `retcode=${resp.retcode}`));
+      else {
+        const retcode = resp.retcode;
+        let hint = resp.message || `retcode=${retcode}`;
+        if (retcode === 1401) hint = `权限不足（retcode=1401）：机器人需要群管理员权限才能执行此操作`;
+        else if (retcode === 1400) hint = `请求参数错误（retcode=1400）：${resp.message || '参数有误'}`;
+        else if (retcode === 1404) hint = `资源不存在（retcode=1404）：消息或群不存在，或消息ID有误`;
+        reject(new Error(hint));
+      }
     });
 
     ws.once('error', (err) => { clearTimeout(timeout); reject(err); });
