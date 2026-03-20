@@ -24,7 +24,7 @@ function readConfig() {
   );
   try {
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-    return raw.channels?.napcat || {};
+    return raw.channels?.['napcat-channel'] || {};
   } catch (err) {
     die('无法读取 OpenClaw 配置', err.message);
   }
@@ -152,8 +152,48 @@ async function resolveMessageText(elements) {
       case 'video':   parts.push('[视频]'); break;
       case 'mface':   parts.push(`[商城表情：${d.summary ?? `ID:${d.emoji_id}`}]`); break;
       case 'reply':   parts.push(`[回复消息 ID:${d.id ?? d.message_id ?? ''}]`); break;
-      case 'forward': parts.push('[转发消息]'); break;
-      case 'xml': case 'json': parts.push('[卡片消息]'); break;
+      case 'forward': {
+        if (Array.isArray(d.content) && d.content.length > 0) {
+          const previews = [];
+          for (const node of d.content.slice(0, 3)) {
+            const nd = node.data ?? node;
+            const sender = nd.name || nd.nickname || nd.sender?.nickname || '未知';
+            let text = '';
+            if (Array.isArray(nd.content)) text = (await resolveMessageText(nd.content)).slice(0, 50);
+            else if (Array.isArray(nd.message)) text = (await resolveMessageText(nd.message)).slice(0, 50);
+            else if (typeof nd.message === 'string') text = nd.message.slice(0, 50);
+            previews.push(`${sender}: ${text || '...'}`);
+          }
+          const more = d.content.length > 3 ? `（共${d.content.length}条）` : '';
+          parts.push(`[转发消息${more}\n${previews.join('\n')}]`);
+        } else if (d.id) {
+          parts.push(`[转发消息 ID:${d.id}]`);
+        } else {
+          parts.push('[转发消息]');
+        }
+        break;
+      }
+      case 'json': {
+        let title = '';
+        const raw = d.data || d.content || '';
+        if (raw) {
+          try {
+            const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            title = obj?.meta?.detail_1?.title || obj?.meta?.news?.title
+                  || obj?.meta?.music?.title   || obj?.meta?.video?.title
+                  || obj?.prompt || obj?.app || '';
+          } catch { /* */ }
+        }
+        parts.push(title ? `[卡片：${title}]` : d.prompt ? `[卡片：${d.prompt}]` : '[JSON 卡片]');
+        break;
+      }
+      case 'xml': {
+        const rawXml = String(d.data || d.content || '');
+        const m = rawXml.match(/title="([^"]*)"/i) || rawXml.match(/summary="([^"]*)"/i)
+               || rawXml.match(/<name>([^<]*)<\/name>/i);
+        parts.push(m?.[1] ? `[XML 卡片：${m[1]}]` : '[XML 卡片]');
+        break;
+      }
       case 'dice':    parts.push(`[骰子：${d.result ?? d.value ?? '?'}点]`); break;
       case 'rps':     parts.push(`[猜拳：${d.result ?? d.value ?? '?'}]`); break;
       case 'poke': case 'shake': parts.push('[戳一戳]'); break;
