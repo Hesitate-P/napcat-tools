@@ -229,7 +229,7 @@ node {baseDir}/scripts/napcat-tools.js del_group_notice <group_id> <notice_id>
 **命令**: `set_essence_msg`
 
 ```bash
-node {baseDir}/scripts/napcat-tools.js set_essence_msg <message_id>
+node {baseDir}/scripts/napcat-tools.js set_essence_msg <message_id> [<group_id>]
 ```
 
 ---

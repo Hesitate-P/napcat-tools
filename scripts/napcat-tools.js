@@ -257,10 +257,10 @@ async function sendAction(action, params) {
       if (resp.retcode === 0 || resp.status === 'ok') resolve(resp.data);
       else {
         const retcode = resp.retcode;
-        let hint = resp.message || `retcode=${retcode}`;
-        if (retcode === 1401) hint = `权限不足（retcode=1401）：机器人需要群管理员权限才能执行此操作`;
-        else if (retcode === 1400) hint = `请求参数错误（retcode=1400）：${resp.message || '参数有误'}`;
-        else if (retcode === 1404) hint = `资源不存在（retcode=1404）：消息或群不存在，或消息ID有误`;
+        let hint = resp.message || resp.wording || `retcode=${retcode}`;
+        if (retcode === 1401 || String(retcode) === '1401') hint = `权限不足（retcode=1401）：机器人需要群管理员权限才能执行此操作`;
+        else if (retcode === 1400 || String(retcode) === '1400') hint = `请求参数错误（retcode=1400）：${resp.message || '参数有误'}`;
+        else if (retcode === 1404 || String(retcode) === '1404') hint = `资源不存在（retcode=1404）：消息或群不存在，或消息ID有误`;
         reject(new Error(hint));
       }
     });
@@ -509,10 +509,28 @@ async function main() {
 
     // ── 设置精华消息 ─────────────────────────────────────────────────────────
     case 'set_essence_msg': {
-      const [messageId] = args;
-      if (!messageId) die('用法: set_essence_msg <message_id>');
+      const [messageId, groupId] = args;
+      if (!messageId) die('用法: set_essence_msg <message_id> [group_id]');
       await sendAction('set_essence_msg', { message_id: String(messageId) });
-      ok(null, `消息 ${messageId} 已设为精华`);
+
+      // NapCat 在权限不足时仍返回 retcode=0（已知 bug），需通过验证确认是否真正生效
+      if (groupId) {
+        try {
+          const list = await sendAction('get_essence_msg_list', { group_id: String(groupId) });
+          const found = (list ?? []).some(
+            (m) => String(m.message_id) === String(messageId) || String(m.msg_seq) === String(messageId),
+          );
+          if (found) {
+            ok(null, `消息 ${messageId} 已成功设为精华`);
+          } else {
+            ok(null, `⚠️ 操作返回成功，但消息未出现在精华列表中。请确认：1) 机器人是群管理员 2) 消息ID正确 3) 该消息未被撤回`);
+          }
+        } catch {
+          ok(null, `消息 ${messageId} 已设为精华（无法验证，请手动确认）`);
+        }
+      } else {
+        ok(null, `消息 ${messageId} 已设为精华（提示：传入 group_id 可自动验证是否生效）`);
+      }
       break;
     }
 
