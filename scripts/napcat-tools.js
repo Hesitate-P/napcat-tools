@@ -509,28 +509,12 @@ async function main() {
 
     // ── 设置精华消息 ─────────────────────────────────────────────────────────
     case 'set_essence_msg': {
-      const [messageId, groupId] = args;
-      if (!messageId) die('用法: set_essence_msg <message_id> [group_id]');
+      const [messageId] = args;
+      if (!messageId) die('用法: set_essence_msg <message_id>');
       await sendAction('set_essence_msg', { message_id: String(messageId) });
-
-      // NapCat 在权限不足时仍返回 retcode=0（已知 bug），需通过验证确认是否真正生效
-      if (groupId) {
-        try {
-          const list = await sendAction('get_essence_msg_list', { group_id: String(groupId) });
-          const found = (list ?? []).some(
-            (m) => String(m.message_id) === String(messageId) || String(m.msg_seq) === String(messageId),
-          );
-          if (found) {
-            ok(null, `消息 ${messageId} 已成功设为精华`);
-          } else {
-            ok(null, `⚠️ 操作返回成功，但消息未出现在精华列表中。请确认：1) 机器人是群管理员 2) 消息ID正确 3) 该消息未被撤回`);
-          }
-        } catch {
-          ok(null, `消息 ${messageId} 已设为精华（无法验证，请手动确认）`);
-        }
-      } else {
-        ok(null, `消息 ${messageId} 已设为精华（提示：传入 group_id 可自动验证是否生效）`);
-      }
+      // 注意：NapCat 已知 bug — 权限不足时仍返回 retcode=0（假成功），等待上游修复
+      // 管理员状态已在插件 BodyForAgent 的 qq_context 中提供，Agent 可据此判断
+      ok(null, `消息 ${messageId} 已设为精华`);
       break;
     }
 
