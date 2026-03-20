@@ -46,9 +46,11 @@ function ok(data, message = '成功') {
 /** 解析目标聊天 */
 function parseTarget(chatType, chatId) {
   const isGroup = chatType === 'group';
-  const id = chatId.startsWith('user:') ? parseInt(chatId.slice(5)) : parseInt(chatId);
-  if (isNaN(id)) die(`无效的 chat_id: ${chatId}`);
-  return { isGroup, id };
+  const rawId = chatId.startsWith('user:') ? chatId.slice(5) : chatId;
+  const numId = parseInt(rawId);
+  if (isNaN(numId)) die(`无效的 chat_id: ${chatId}`);
+  // group_id/user_id 对 NapCat 统一传 string（官方文档要求）
+  return { isGroup, id: String(numId) };
 }
 
 // ============================================================================
@@ -371,13 +373,13 @@ async function main() {
         count: limit,
       });
 
-      const messages = (result?.messages ?? []).map((msg) => ({
+      const messages = await Promise.all((result?.messages ?? []).map(async (msg) => ({
         message_id:  msg.message_id,
         sender_id:   msg.sender?.user_id || msg.user_id,
-        sender_name: msg.sender?.nickname || msg.sender?.card || '未知',
-        content:     resolveMessageText(msg.message ?? []),
+        sender_name: msg.sender?.card || msg.sender?.nickname || '未知',
+        content:     await resolveMessageText(msg.message ?? []),
         timestamp:   msg.time ? msg.time * 1000 : Date.now(),
-      }));
+      })));
 
       ok({ messages, total: messages.length }, '查询成功');
       break;
@@ -414,7 +416,7 @@ async function main() {
     case 'delete_msg': {
       const [messageId] = args;
       if (!messageId) die('用法: delete_msg <message_id>');
-      await sendAction('delete_msg', { message_id: parseInt(messageId) });
+      await sendAction('delete_msg', { message_id: String(messageId) });
       ok(null, `消息 ${messageId} 已撤回`);
       break;
     }
@@ -423,12 +425,12 @@ async function main() {
     case 'get_msg': {
       const [messageId] = args;
       if (!messageId) die('用法: get_msg <message_id>');
-      const result = await sendAction('get_msg', { message_id: parseInt(messageId) });
-      const content = resolveMessageText(result?.message ?? []);
+      const result = await sendAction('get_msg', { message_id: String(messageId) });
+      const content = await resolveMessageText(result?.message ?? []);
       ok({
         message_id:  result?.message_id,
         sender_id:   result?.sender?.user_id,
-        sender_name: result?.sender?.nickname || result?.sender?.card || '未知',
+        sender_name: result?.sender?.card || result?.sender?.nickname || '未知',
         content,
         raw_message: result?.raw_message,
         time:        result?.time,
