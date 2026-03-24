@@ -109,13 +109,17 @@ async function main() {
         [isGroup ? 'group_id' : 'user_id']: id,
         count: limit,
       });
-      const messages = await Promise.all((result?.messages ?? []).map(async (msg) => ({
-        message_id:  msg.message_id,
-        sender_id:   msg.sender?.user_id || msg.user_id,
-        sender_name: msg.sender?.card || msg.sender?.nickname || '未知',
-        content:     await resolveMessageText(msg.message ?? []),
-        timestamp:   msg.time ? msg.time * 1000 : Date.now(),
-      })));
+      const messages = await Promise.all((result?.messages ?? []).map(async (msg) => {
+        const ts = msg.time ? msg.time * 1000 : Date.now();
+        return {
+          message_id:  msg.message_id,
+          sender_id:   msg.sender?.user_id || msg.user_id,
+          sender_name: msg.sender?.card || msg.sender?.nickname || '未知',
+          content:     await resolveMessageText(msg.message ?? []),
+          timestamp:   ts,
+          time:        new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+        };
+      }));
       ok({ messages, total: messages.length }, '查询成功');
       break;
     }
