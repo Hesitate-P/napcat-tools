@@ -132,7 +132,9 @@ node napcat-tools.js query_messages <chat_type> <chat_id> [limit]
 node napcat-tools.js query_messages group 870560083 20
 ```
 
-返回：`{ messages: [{ message_id, sender_id, sender_name, content, timestamp }], total }`
+返回：`{ messages: [{ message_id, sender_id, sender_name, content, timestamp, time }], total }`
+
+`timestamp` 为毫秒时间戳，`time` 为北京时间可读字符串（如 `2026/3/24 15:30:00`）。
 
 #### `get_msg` — 获取单条消息详情
 
@@ -232,7 +234,12 @@ node napcat-tools.js get_essence_msg_list <group_id>
 ```
 napcat-tools/
 ├── scripts/
-│   └── napcat-tools.js     # 主脚本（ESM）
+│   └── napcat-tools.js     # 主脚本（ESM），所有命令入口
+├── lib/
+│   ├── api.js              # WebSocket API 调用（Header 鉴权，settled 防重入）
+│   ├── config.js           # 从 openclaw.json 读取连接配置
+│   ├── message.js          # 消息元素 → 可读文本解析（27 种类型）
+│   └── utils.js            # ok/die/parseTarget 工具函数
 ├── face-map-cache.json     # QQ 表情名称本地缓存（自动生成）
 ├── temp/                   # 文件下载临时目录（自动创建）
 ├── package.json
