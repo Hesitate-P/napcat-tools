@@ -1,3 +1,4 @@
 node_modules/
 temp/
 face-map-cache.json
+lib/face-map-cache.json
