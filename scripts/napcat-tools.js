@@ -36,6 +36,21 @@ async function main() {
       break;
     }
 
+    // ── 发送图片 ───────────────────────────────────────────────────────────
+    case 'send_image': {
+      const [chatType, chatId, fileArg] = args;
+      if (!chatType || !chatId || !fileArg) die('用法: send_image <chat_type> <chat_id> <url_or_path>');
+      const { isGroup, id } = parseTarget(chatType, chatId);
+      // 本地绝对路径自动转 file:// URI
+      const file = fileArg.startsWith('/') ? `file://${fileArg}` : fileArg;
+      const result = await sendAction(isGroup ? 'send_group_msg' : 'send_private_msg', {
+        [isGroup ? 'group_id' : 'user_id']: id,
+        message: [{ type: 'image', data: { file } }],
+      });
+      ok(result, '图片发送成功');
+      break;
+    }
+
     // ── 发送文件 ───────────────────────────────────────────────────────────
     case 'send_file': {
       const [chatType, chatId, filePath, fileName] = args;
@@ -271,7 +286,7 @@ async function main() {
     // ── 未知命令 ──────────────────────────────────────────────────────────
     default:
       die('未知命令', [
-        'send_message', 'send_file', 'send_record', 'send_video',
+        'send_message', 'send_image', 'send_file', 'send_record', 'send_video',
         'download_file', 'query_messages', 'get_sessions', 'get_group_members',
         'delete_msg', 'get_msg',
         'set_group_ban', 'set_group_kick',

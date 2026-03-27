@@ -43,7 +43,27 @@ node ~/.openclaw/workspace/skills/napcat-tools/scripts/napcat-tools.js send_mess
 
 ---
 
-### 2. 查询历史消息
+### 2. 发送图片
+
+**命令**: `send_image`
+
+```bash
+node {baseDir}/scripts/napcat-tools.js send_image <chat_type> <chat_id> <url_or_path>
+```
+
+- `url_or_path`: HTTP URL、`base64://...`、`file:///path/to/img.png`，或本地绝对路径（`/home/...` 自动转 `file://`）
+
+**示例**:
+```bash
+# HTTP URL
+node ~/.openclaw/workspace/skills/napcat-tools/scripts/napcat-tools.js send_image group 870560083 "https://example.com/img.png"
+# 本地文件
+node ~/.openclaw/workspace/skills/napcat-tools/scripts/napcat-tools.js send_image direct user:123456 "/home/pagurian/.openclaw/media/browser/xxx.png"
+```
+
+---
+
+### 3. 查询历史消息
 
 **命令**: `query_messages`
 
